@@ -4,9 +4,9 @@ Upload a PDF and ask questions about it, by typing or speaking. Every answer cit
 pages it came from and shows the exact passages it used, so you can check it yourself.
 If the document doesn't contain the answer, DocBot says so instead of making one up.
 
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://YOUR-APP-NAME.streamlit.app)
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://shruti-docbot.streamlit.app)
 
-**Live demo:** https://YOUR-APP-NAME.streamlit.app. It works on phones too. If it has been idle,
+**Live demo:** https://shruti-docbot.streamlit.app. It works on phones too. If it has been idle,
 click "Yes, get this app back up!" and give it about a minute to wake up.
 
 ![Chat with answers and their sources](docs/screenshots/chat-light.png)
@@ -89,7 +89,7 @@ like "hi" or "thanks" get an instant reply without calling the model.
 You need Python 3.13 and a free Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey).
 
 ```bash
-git clone https://github.com/YOUR-USERNAME/docbot.git
+git clone https://github.com/shruti041/docbot.git
 cd docbot
 python -m venv env
 env\Scripts\activate          # Windows
