@@ -17,8 +17,9 @@ click "Yes, get this app back up!" and give it about a minute to wake up.
 
 ## Features
 
-- **Answers grounded in your PDF.** DocBot answers only from the document, cites pages like
-  "(page 41)", and lists the source passages under each answer.
+- **Answers grounded in your PDF.** DocBot answers only from the document. Under each answer, a
+  **Source** box shows the pages it came from and the exact passages, keeping the answer itself
+  clean to read and pleasant to listen to.
 - **Says "I couldn't find that"** when the document doesn't answer the question, instead of
   guessing from general knowledge.
 - **Voice in, voice out.** Ask by microphone; spoken questions get spoken answers. Any answer can
@@ -64,13 +65,14 @@ flowchart LR
      "what does it cover?"), passages are sampled from across the whole document.
 3. **Answering.** Gemini gets the passages, the last few chat messages and strict rules:
    - use only the passages
-   - cite pages
    - answer partially when that's all the passages support
    - otherwise reply "I couldn't find that in the document."
+   - end with a hidden line listing the pages it used
 
-   The answer streams in word by word.
-4. **Checking.** The pages the answer cites are matched to the passages it was given and shown as
-   sources. A cited page that wasn't among them is flagged.
+   The answer streams in word by word. The hidden pages line is filtered out of the stream as it
+   arrives, so readers never see it.
+4. **Checking.** The pages on that line are matched to the passages Gemini was given and shown in
+   the **Source** box under the answer. A listed page that wasn't among them is flagged.
 5. **Voice.** Spoken questions are transcribed by Gemini. Answers are read aloud by the browser's
    built-in speech engine.
    - The live level meter uses the Web Audio API on the same microphone stream.

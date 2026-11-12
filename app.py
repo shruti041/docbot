@@ -802,13 +802,17 @@ Rules:
   answer its most likely meaning.
 - You may draw simple, direct conclusions from the excerpts (for example, whether someone has
   work experience, or how many years), and say what they're based on.
-- Cite the page for every fact, like (page 41).
+- Don't put page numbers or citations like "(page 41)" inside the answer; the app shows the
+  sources below the answer.
 - If the excerpts answer only part of the question, answer that part and say what's missing.
 - If the excerpts contain nothing that answers the question, reply exactly: "{NOT_FOUND_ANSWER}"
 - If the whole message is just small talk (a greeting, "how are you", thanks, "who are you") and
-  asks nothing about the document, reply briefly and warmly, without page citations, and invite
-  questions about the document. Otherwise, answer directly without greetings or pleasantries.
+  asks nothing about the document, reply briefly and warmly and invite questions about the
+  document. Otherwise, answer directly without greetings or pleasantries.
 - {language_rule}{note}
+- End with one last line, in English and plain text, listing the page numbers of the excerpts
+  your answer used: "{SOURCES_MARKER} 12, 41". Write "{SOURCES_MARKER} none" if you used none
+  (small talk, or nothing found).
 
 document excerpts:
 {context}
@@ -819,15 +823,67 @@ conversation so far:
 question: {query}"""
 
 
-def pick_sources(answer, documents):
-    """The passages whose pages the answer cites, plus any cited pages that weren't
-    among the passages, which may be wrong. An answer that cites no pages (e.g. a
-    reply to small talk) gets no sources."""
-    cited = set()
-    ## "page 41", "pages 41 and 42", Hindi "पृष्ठ 41"
-    for group in re.findall(r"(?:\bpages?|पृष्ठ)\s+(\d+(?:\s*(?:,|and|&|-|–|और|तथा)\s*\d+)*)",
-                            answer, re.IGNORECASE):
-        cited.update(int(n) for n in re.findall(r"\d+", group))
+## Gemini ends each answer with a line like "SOURCES: 12, 41". AnswerStream takes it
+## off before the answer is shown, and pick_sources turns it into the Sources box.
+SOURCES_MARKER = "SOURCES:"
+## "page 41", "pages 41 and 42", Hindi "पृष्ठ 41"
+_PAGE_REF = r"(?:\bpages?|\bp\.|पृष्ठ)\s*(\d+(?:\s*(?:,|and|&|-|–|और|तथा)\s*\d+)*)"
+
+
+class AnswerStream:
+    """Passes Gemini's answer through as it streams, but holds back the final
+    "SOURCES: ..." line (kept in .sources_line), so readers never see it."""
+
+    def __init__(self, chunks):
+        self.chunks = chunks
+        self.sources_line = ""
+
+    def __iter__(self):
+        marker = SOURCES_MARKER.upper()
+        pending = ""
+        for piece in self.chunks:
+            if self.sources_line:  # already past the marker
+                self.sources_line += piece
+                continue
+            pending += piece
+            at = pending.upper().find(marker)
+            if at >= 0:
+                self.sources_line = pending[at + len(marker):] or " "
+                text = pending[:at].rstrip(" \t\n*_")
+                if text:
+                    yield text
+                pending = ""
+                continue
+            ## Hold back the end if it could be the start of the marker, plus any
+            ## spaces / newlines / bold markers just before it
+            keep = 0
+            for size in range(min(len(marker) - 1, len(pending)), 0, -1):
+                if marker.startswith(pending[-size:].upper()):
+                    keep = size
+                    break
+            while keep < len(pending) and pending[-keep - 1] in " \t\n*_":
+                keep += 1
+            if len(pending) > keep:
+                yield pending[:len(pending) - keep]
+                pending = pending[len(pending) - keep:]
+        if pending and not self.sources_line:
+            yield pending.rstrip()
+
+
+def remove_inline_citations(text):
+    ## In case Gemini still writes "(page 41)" inside the answer
+    return re.sub(rf"\s*\((?:see\s+)?{_PAGE_REF}\)", "", text, flags=re.IGNORECASE).strip()
+
+
+def pick_sources(answer, sources_line, documents):
+    """The passages from the pages listed on the answer's SOURCES line, plus any
+    listed pages that weren't among the passages, which may be wrong. An answer
+    that lists no pages (e.g. a reply to small talk) gets no sources."""
+    cited = {int(n) for n in re.findall(r"\d+", sources_line)}
+    if not sources_line.strip():
+        ## No SOURCES line: fall back to page references inside the answer
+        for group in re.findall(_PAGE_REF, answer, re.IGNORECASE):
+            cited.update(int(n) for n in re.findall(r"\d+", group))
     used = [d for d in documents if d.metadata.get("page") in cited]
     sources = [{"page": d.metadata.get("page"), "text": d.page_content} for d in used]
     unverified = sorted(cited - {d.metadata.get("page") for d in documents})
@@ -849,7 +905,8 @@ def show_sources(sources, unverified_pages=()):
         return
     pages = sorted({s["page"] for s in sources}, key=lambda p: (p is None, p))
     label = "Source: page " if len(pages) == 1 else "Sources: pages "
-    with st.expander(label + ", ".join(map(str, pages)), icon=":material/menu_book:"):
+    label += ", ".join(map(str, pages[:5])) + (f" +{len(pages) - 5} more" if len(pages) > 5 else "")
+    with st.expander(label, icon=":material/menu_book:"):
         for s in sources:
             st.markdown(f"**Page {s['page']}**")
             st.markdown(_escape_markdown(s["text"]))
@@ -1193,7 +1250,7 @@ if not st.session_state.document_uploaded:
         ("forum", "Ask naturally",
          "Type or tap the mic, in English or Hindi. Follow-ups like \"explain that\" work too."),
         ("menu_book", "Answers with sources",
-         "Each answer cites its pages and shows the exact passages it used."),
+         "Below each answer, see the pages and exact passages it came from."),
         ("record_voice_over", "Listen to answers",
          "Spoken questions get spoken answers. Replay any answer anytime."),
     ]
@@ -1343,12 +1400,14 @@ else:
                             prompt = build_prompt(query, documents, history, note)
 
                             ## Stream the answer; keep the dots until the first words arrive
-                            stream = _answer_text(get_llm().stream(prompt))
+                            answer_stream = AnswerStream(_answer_text(get_llm().stream(prompt)))
+                            stream = iter(answer_stream)
                             first_part = next(stream, "")
 
                     if documents:
                         ## Show the answer word by word as Gemini generates it
                         answer = st.write_stream(chain([first_part], stream))
+                        answer = remove_inline_citations(answer if isinstance(answer, str) else "")
                     else:
                         ## Small-talk reply, or "not found" (never answered from Gemini's own knowledge)
                         answer = answer or NOT_FOUND_ANSWER
@@ -1364,7 +1423,7 @@ else:
             ## Sources (none for "not found"), tips, and Listen / Stop
             sources, unverified_pages = [], []
             if documents and answer.strip() != NOT_FOUND_ANSWER:
-                sources, unverified_pages = pick_sources(answer, documents)
+                sources, unverified_pages = pick_sources(answer, answer_stream.sources_line, documents)
             reply = {"role": "assistant", "content": answer, "sources": sources,
                      "unverified_pages": unverified_pages,
                      "not_found": answer.strip() == NOT_FOUND_ANSWER, "asked_by_voice": voice}
