@@ -1,0 +1,19 @@
+# Secrets -- never commit these. Set them in your host's secrets/environment settings.
+.env
+.streamlit/secrets.toml
+
+# Local virtual environment and Python caches
+env/
+.venv/
+__pycache__/
+*.pyc
+
+# Saved PDF indexes (contain the text of uploaded documents) and old files
+vector_cache/
+vector_db.json
+
+# Editor / OS clutter
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

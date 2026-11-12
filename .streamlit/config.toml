@@ -1,0 +1,36 @@
+[client]
+## Hide the developer toolbar ("Deploy" button etc.) for a cleaner app
+toolbarMode = "minimal"
+
+[server]
+## Largest PDF a visitor can upload, in MB (Streamlit's default is 200).
+## Keep in sync with MAX_UPLOAD_MB in app.py.
+maxUploadSize = 20
+
+[theme]
+baseRadius = "large"
+showSidebarBorder = true
+## Google Fonts, with the default font as a fallback if they can't load
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap, sans-serif"
+headingFont = "Plus Jakarta Sans:https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&display=swap, sans-serif"
+
+## Light mode: "Morning Mint" -- teal + sky blue with a coral accent
+## (the matching gradients, glows and animations are in STYLES in app.py)
+[theme.light]
+primaryColor = "#0D9488"
+backgroundColor = "#F6FBFA"
+secondaryBackgroundColor = "#E6F3F1"
+textColor = "#0F2A2E"
+
+[theme.light.sidebar]
+backgroundColor = "#EEF8F6"
+
+## Dark mode: "Midnight Neon" -- electric violet + cyan with a neon-pink accent
+[theme.dark]
+primaryColor = "#A78BFA"
+backgroundColor = "#0A0A1A"
+secondaryBackgroundColor = "#17162E"
+textColor = "#E7E7FA"
+
+[theme.dark.sidebar]
+backgroundColor = "#0E0D22"
