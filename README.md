@@ -23,6 +23,10 @@ click "Yes, get this app back up!" and give it about a minute to wake up.
   guessing from general knowledge.
 - **Voice in, voice out.** Ask by microphone; spoken questions get spoken answers. Any answer can
   be replayed with **Listen**.
+  - While you speak, a live level meter of dots stretches into tall bars, so you can see the mic is
+    hearing you.
+  - If the recording is silent, noisy or unclear, DocBot gently asks you to say it again instead of
+    guessing.
 - **English and Hindi.** Questions in Hindi (or other non-Latin scripts) are answered in the same
   language.
 - **Natural follow-ups.** "Explain that simply" or "tell me more" use the conversation so far.
@@ -56,7 +60,8 @@ flowchart LR
    lookup for references like "Article 21" or "Section 4A".
    - Short documents (up to about 25 pages, like a resume) are sent to the model whole, so any
      question works, including "summarize this".
-   - For summaries of long documents, passages are sampled from across the whole document.
+   - For questions about a long document as a whole ("what's this PDF about?", "summarize it",
+     "what does it cover?"), passages are sampled from across the whole document.
 3. **Answering.** Gemini gets the passages, the last few chat messages and strict rules:
    - use only the passages
    - cite pages
@@ -68,6 +73,10 @@ flowchart LR
    sources. A cited page that wasn't among them is flagged.
 5. **Voice.** Spoken questions are transcribed by Gemini. Answers are read aloud by the browser's
    built-in speech engine.
+   - The live level meter uses the Web Audio API on the same microphone stream.
+   - Recordings are checked for loudness before transcription, because speech models given
+     silence sometimes invent words. Silent or unclear recordings get a gentle "could you say that
+     again?", shown and spoken.
 
 **Speed:** the embedding model is loaded once, recently used PDFs stay in memory, and greetings
 like "hi" or "thanks" get an instant reply without calling the model.
