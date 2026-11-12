@@ -7,11 +7,14 @@ import html as html_lib
 import re
 import json
 import math
+import random
 import time
 import base64
 import hashlib
 import hmac
+import io
 import logging
+import wave
 import tempfile
 import threading
 from collections import Counter, OrderedDict, deque
@@ -69,6 +72,7 @@ if os.path.isdir(os.path.join(_HF_HUB_CACHE, "models--" + EMBEDDING_MODEL.replac
     ## warning that offline mode triggers.
     logging.getLogger("huggingface_hub.hf_api").setLevel(logging.ERROR)
 
+import numpy as np
 import pymupdf
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage
@@ -280,6 +284,15 @@ STYLES = """
 [data-testid="stChatInput"] > div:first-child { transition: box-shadow .2s ease; }
 [data-testid="stChatInput"]:focus-within > div:first-child { box-shadow: 0 0 0 4px var(--tint-strong), var(--glow); }
 [data-testid="stChatInputMicButton"]:hover { transform: scale(1.1); transition: transform .15s ease; }
+/* live microphone level (drawn by MIC_LEVEL_SCRIPT): small dots while it's quiet,
+   which stretch into tall glowing bars while you speak. Streamlit's own thin
+   waveform is hidden only while recording, so playback afterwards is unchanged. */
+[data-testid="stChatInputWaveform"].mic-live > div:not(.mic-dots) { opacity: 0; }
+.mic-dots { position: absolute; inset: 0; z-index: 1; display: flex; align-items: center; justify-content: flex-end;
+            gap: 4px; padding: 0 6px; overflow: hidden; pointer-events: none; }
+.mic-dots i { flex: none; width: 5px; height: 5px; border-radius: 99px; opacity: .45;
+              background: linear-gradient(180deg, var(--c2), var(--c1)); transition: height .07s linear, opacity .07s linear; }
+.mic-dots i.on { opacity: 1; box-shadow: 0 0 6px var(--c2); }
 
 /* thinking indicator: a little robot reading, plus bouncing dots */
 .typing { display: flex; align-items: center; gap: .55rem; padding: .2rem 0; }
@@ -318,6 +331,98 @@ STYLES = """
 </style>
 """
 st.html(STYLES)
+
+## Live microphone level while recording a question. Streamlit draws thin lines
+## that barely move with normal speech, and their look can't be configured, so
+## this listens to the same microphone stream and draws dots over them: each new
+## dot enters on the right, and its height shows how loud you are at that moment
+## (measured in decibels, like hearing, so speech clearly stands out from silence).
+MIC_LEVEL_SCRIPT = """
+<script>
+(() => {
+  if (window.__micLevel) return;
+  window.__micLevel = true;
+  const media = navigator.mediaDevices;
+  if (!media || !media.getUserMedia) return;
+  const getUserMedia = media.getUserMedia.bind(media);
+  media.getUserMedia = async (constraints) => {
+    const stream = await getUserMedia(constraints);
+    if (constraints && constraints.audio) {
+      try { showLevel(stream); } catch (e) { /* never break recording */ }
+    }
+    return stream;
+  };
+
+  let current = null;  // the microphone being shown; a new recording replaces it
+
+  function showLevel(stream) {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    if (current) current.stop();
+    const audio = new AudioCtx();
+    audio.resume().catch(() => {});
+    const analyser = audio.createAnalyser();
+    analyser.fftSize = 1024;
+    audio.createMediaStreamSource(stream).connect(analyser);
+    const samples = new Float32Array(analyser.fftSize);
+    let box = null, row = null, dots = [], levels = [], last = 0, smooth = 0, stopped = false;
+
+    const live = () => stream.getAudioTracks().some(t => t.readyState === "live");
+    function hide() {
+      if (row) row.remove();
+      if (box) box.classList.remove("mic-live");
+      box = row = null;
+    }
+    const me = { stop() { stopped = true; hide(); audio.close().catch(() => {}); } };
+    current = me;
+
+    function frame(now) {
+      if (stopped) return;
+      if (!live()) return me.stop();
+      // Streamlit shows the waveform box only while it's recording
+      const target = document.querySelector('[data-testid="stChatInputWaveform"]');
+      if (!target || !target.offsetWidth) {
+        hide();
+        return setTimeout(() => requestAnimationFrame(frame), 250);  // check again soon
+      }
+      if (target !== box || !row || !row.isConnected) {
+        hide();
+        box = target;
+        row = document.createElement("div");
+        row.className = "mic-dots";
+        row.setAttribute("aria-hidden", "true");
+        const count = Math.max(8, Math.floor((box.offsetWidth - 12) / 9));
+        for (let i = 0; i < count; i++) row.appendChild(document.createElement("i"));
+        box.appendChild(row);
+        box.classList.add("mic-live");
+        dots = Array.from(row.children);
+        levels = new Array(count).fill(0);
+        smooth = 0;
+      }
+      analyser.getFloatTimeDomainData(samples);
+      let sum = 0;
+      for (const s of samples) sum += s * s;
+      const decibels = 20 * Math.log10(Math.sqrt(sum / samples.length) + 1e-8);
+      // -50 dB (room hush) -> 0 ... -15 dB (clear speech) -> 1
+      const level = Math.min(1, Math.max(0, (decibels + 50) / 35));
+      smooth = Math.max(level, smooth * 0.8);  // rise instantly, fall gently
+      if (now - last > 70) {  // a new dot about 14 times a second
+        last = now;
+        levels.push(smooth);
+        levels.shift();
+        const tallest = Math.max(10, box.offsetHeight - 6);
+        dots.forEach((dot, i) => {
+          dot.style.height = (5 + levels[i] * (tallest - 5)).toFixed(1) + "px";
+          dot.classList.toggle("on", levels[i] > 0.1);
+        });
+      }
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+"""
 
 
 def robot_html(size, extra_class=""):
@@ -615,11 +720,33 @@ def whole_document():
     return docs if sum(len(d.page_content) for d in docs) <= WHOLE_DOCUMENT_MAX_CHARS else None
 
 
+_DOC_WORD = r"(?:document|doc|pdf|file|book|report|paper|text|resume|cv|handbook|manual)"
+_END = r"\s*[?.!]*\s*$"
+## Questions about the document as a whole, in the many ways people (and speech
+## recognition) phrase them. Most patterns must end the sentence, so specific
+## questions like "what does the document say about leave?" use normal search.
+_OVERVIEW = re.compile(
+    r"\b(?:summar\w*|overview|gist|key points|main points|highlights|tl;?dr)\b"
+    # what is this (document) (is) (all) about / what's this pdf about
+    rf"|\b(?:this|the)\s+(?:{_DOC_WORD}\s+)?(?:is\s+)?(?:all\s+)?about{_END}"
+    # tell me about this pdf
+    rf"|\babout\s+(?:this|the)\s+{_DOC_WORD}{_END}"
+    # explain / describe this pdf
+    rf"|\b(?:describe|explain|introduce)\s+(?:this|the)\s+{_DOC_WORD}{_END}"
+    # what does this document contain / cover / talk about
+    rf"|\b(?:this|the|it)\s+(?:{_DOC_WORD}\s+)?(?:contains?|covers?|talks?\s+about|"
+    rf"discuss(?:es)?|deals?\s+with){_END}"
+    # what's the main idea / topic (of this document)
+    rf"|\b(?:main|central|overall)\s+(?:idea|topic|theme|subject|purpose|message)s?"
+    rf"(?:\s+of\s+(?:this|the|it)(?:\s+{_DOC_WORD})?)?{_END}"
+    # the purpose / topic of this document
+    rf"|\b(?:topic|subject|purpose|theme)s?\s+of\s+(?:this|the)\s+{_DOC_WORD}\b",
+    re.IGNORECASE)
+
+
 def wants_overview(query):
-    ## "Summarize this", "what is this document about", "key points", ...
-    return re.search(r"\b(?:summar\w*|overview|gist|key points|main points|highlights|"
-                     r"what (?:is|'s) (?:this|the) (?:document|pdf|file|book|report) about)\b",
-                     query, re.IGNORECASE) is not None
+    ## "Summarize this", "what's this pdf about", "what does it cover", "key points", ...
+    return _OVERVIEW.search(query.strip()) is not None
 
 
 def overview_sample():
@@ -737,16 +864,81 @@ def _answer_text(stream):
 
 # ---------------------------------------------------------------- voice
 
+UNCLEAR_SPEECH = "[unclear]"
+
+
 def transcribe(audio_file):
     ## Speech -> text with Gemini (same API key, no extra packages)
     message = HumanMessage(content=[
         {"type": "text", "text": "Transcribe the speech in this recording exactly, in the language "
                                  "spoken. Reply with only the transcription. If there is no speech, "
-                                 "reply with nothing."},
+                                 "or it is too faint, noisy or garbled to understand, reply with "
+                                 f"exactly: {UNCLEAR_SPEECH}"},
         {"type": "audio", "base64": base64.b64encode(audio_file.getvalue()).decode(),
          "mime_type": "audio/wav"},
     ])
     return get_llm().invoke([message]).text.strip()
+
+
+def sounds_silent(audio_bytes):
+    """True if a recording is (nearly) silent or just an accidental tap. Checked
+    before transcription: given silence, speech models sometimes invent words
+    (e.g. a random sentence in another language)."""
+    try:
+        with wave.open(io.BytesIO(audio_bytes)) as recording:
+            width, rate = recording.getsampwidth(), recording.getframerate()
+            channels = recording.getnchannels()
+            frames = recording.readframes(recording.getnframes())
+        samples = np.frombuffer(frames, dtype={1: np.uint8, 2: np.int16, 4: np.int32}[width])
+    except Exception:
+        return False  # can't read it here; let Gemini try
+    samples = samples.astype(np.float32)
+    if width == 1:
+        samples -= 128  # 8-bit WAV is unsigned
+    samples /= float(2 ** (8 * width - 1))
+    if len(samples) / (rate * channels) < 0.4:
+        return True
+    ## Loudness of each 30 ms slice; very soft speech is around 0.005 and up
+    slice_len = int(rate * channels * 0.03)
+    count = len(samples) // slice_len
+    loudness = np.sqrt((samples[:count * slice_len].reshape(count, slice_len) ** 2).mean(axis=1))
+    return int((loudness > 0.005).sum()) < 8  # under ~0.25 s of sound
+
+
+_FILLER_WORDS = {"uh", "uhh", "um", "umm", "hmm", "hm", "mm", "mmm", "ah", "er", "erm", "oh", "huh", "eh"}
+
+
+def is_unclear(transcript):
+    """True if nothing usable was heard: silence, noise, or only "um"/"hmm"."""
+    text = (transcript or "").strip()
+    ## "[unclear]", and tags like "(inaudible)" or "[no speech]" that models sometimes write
+    if not text or re.fullmatch(r"[\[(].*[\])]\W*", text):
+        return True
+    words = re.findall(r"\w+", text.lower())
+    return not words or all(word in _FILLER_WORDS for word in words)
+
+
+## Gentle replies when a recording couldn't be understood (one is picked at random,
+## so the bot doesn't sound like a machine repeating itself)
+_REPEAT_REPLIES = [
+    "Sorry, I couldn't quite hear you. Could you please say that again?",
+    "I'm sorry, I didn't catch that. Could you repeat it, maybe a little closer to the mic?",
+    "Hmm, I wasn't able to hear you clearly. Would you mind saying it once more?",
+    "Sorry, that didn't come through clearly. Please try again, or type your question if that's easier.",
+]
+_TROUBLE_REPLY = ("I'm so sorry, I'm having a little trouble hearing you right now. "
+                  "Please try again in a moment, or type your question below.")
+## Added to "not found" replies to spoken questions, in case the question was misheard
+MISHEARD_HINT = "If I misheard you, please say it again, or type your question."
+
+
+def ask_to_repeat(index, trouble=False):
+    ## Shown (and spoken) as the bot's reply instead of an answer. Not saved to the
+    ## chat history, so it doesn't confuse follow-up questions.
+    reply = _TROUBLE_REPLY if trouble else random.choice(_REPEAT_REPLIES)
+    with chat_bubble("assistant", index):
+        st.markdown(f":material/hearing: {reply}")
+    speak(reply)
 
 
 def _run_voice_script(js):
@@ -884,7 +1076,9 @@ def show_message(message, index):
 def show_answer_extras(message, index):
     ## Under an answer: sources, a tip if nothing was found, and Listen / Stop
     show_sources(message.get("sources"), message.get("unverified_pages"))
-    if message.get("not_found"):
+    if message.get("not_found") and message.get("asked_by_voice"):
+        st.caption(f":material/hearing: {MISHEARD_HINT}")
+    elif message.get("not_found"):
         st.caption(":material/lightbulb: Try rephrasing, or use names, numbers or terms "
                    "that appear in the document.")
     voice_buttons(index, message["content"])
@@ -1072,6 +1266,7 @@ else:
 
     ## Type a question, or click the mic to speak it
     short_name = name if len(name) <= 28 else name[:25] + "..."
+    st.html(MIC_LEVEL_SCRIPT, unsafe_allow_javascript=True)  # dots that show your voice level
     user_input = st.chat_input(f"Ask about {short_name}...", accept_audio=True)
     pending = st.session_state.pop("pending_query", None)
 
@@ -1082,20 +1277,29 @@ else:
             st.warning(limit_message, icon=":material/hourglass_top:")
             st.stop()
         voice = bool(user_input) and user_input.audio is not None
-        with chat_bubble("user", len(st.session_state.messages)):
-            spoken = ""
-            if voice:
-                try:
-                    with thinking("Transcribing your question..."):
+        typed = (user_input.text if user_input else pending) or ""
+        spoken = ""
+        if voice:
+            try:
+                if not sounds_silent(user_input.audio.getvalue()):
+                    with thinking("Listening to your question..."):
                         spoken = transcribe(user_input.audio)
-                except Exception as e:
-                    st.error(f"Couldn't understand the recording: {e}", icon=":material/error:")
+            except Exception:
+                logging.getLogger(__name__).exception("Transcription failed")
+                if not typed.strip():
+                    ask_to_repeat(len(st.session_state.messages) + 1, trouble=True)
                     st.stop()
-            typed = user_input.text if user_input else pending
-            query = " ".join(part for part in [typed, spoken] if part).strip()
-            if not query:
-                st.warning("I didn't catch that. Please try speaking again.", icon=":material/mic_off:")
-                st.stop()
+            if is_unclear(spoken):
+                spoken = ""
+                if not typed.strip():
+                    ## Nothing understandable was said: gently ask to repeat it
+                    ask_to_repeat(len(st.session_state.messages) + 1)
+                    st.stop()
+        query = " ".join(part for part in [typed, spoken] if part).strip()
+        if not query:
+            st.stop()
+        voice = bool(spoken)  # only questions that were actually heard count as spoken
+        with chat_bubble("user", len(st.session_state.messages)):
             st.markdown((":material/mic: " if voice else "") + query)
 
         with chat_bubble("assistant", len(st.session_state.messages) + 1):
@@ -1120,14 +1324,18 @@ else:
                             documents = whole
                         else:
                             search_query = to_english(query)
+                            documents = retrieve(search_query,
+                                                 previous_questions[-1] if previous_questions else None)
                             if wants_overview(search_query):
-                                ## "Summarize this": passages from across the long document
-                                documents = overview_sample()
-                                note = ("\n- The excerpts are a sample from across a long document. "
-                                        "Say that the summary is based on selected sections.")
-                            else:
-                                documents = retrieve(search_query,
-                                                     previous_questions[-1] if previous_questions else None)
+                                ## "What's this pdf about?": passages from across the long
+                                ## document, plus the search results in case the question
+                                ## is about one part ("summarize Article 21")
+                                overview = overview_sample()
+                                seen = {d.page_content for d in overview}
+                                documents = overview + [d for d in documents if d.page_content not in seen]
+                                note = ("\n- Some excerpts are a sample from across a long document. For "
+                                        "questions about the whole document, describe what it is and "
+                                        "its main topics, and say this is based on selected sections.")
 
                         if documents:
                             ## Last few messages so follow-ups like "explain that more simply" make sense
@@ -1159,13 +1367,14 @@ else:
                 sources, unverified_pages = pick_sources(answer, documents)
             reply = {"role": "assistant", "content": answer, "sources": sources,
                      "unverified_pages": unverified_pages,
-                     "not_found": answer.strip() == NOT_FOUND_ANSWER}
+                     "not_found": answer.strip() == NOT_FOUND_ANSWER, "asked_by_voice": voice}
             ## Same index as this answer gets in the history list on the next rerun
             show_answer_extras(reply, len(st.session_state.messages) + 1)
 
-            ## Read the answer aloud automatically for spoken questions
+            ## Read the answer aloud automatically for spoken questions. If nothing was
+            ## found for a spoken question, it may have been misheard: gently say so.
             if voice or st.session_state.auto_speak:
-                speak(answer)
+                speak(answer + (" " + MISHEARD_HINT if voice and reply["not_found"] else ""))
 
         st.session_state.messages += [
             {"role": "user", "content": query, "voice": voice, "search_query": search_query,
